@@ -1,0 +1,182 @@
+mport numpy as np
+import pandas as pd
+import copy
+import time
+
+
+class FMM(object): #FMMの定義
+    
+    def __init__(self, N, **define_class): #コンストラクタの定義 
+        ###引数の受け取り###
+        self.N = np.array(N) #データセット　#Numpy配列
+        self.L = len(self.N) #データセットの行数（データ数）
+        self.Z = define_class["z"] #潜在クラスZ（結果系）の数
+        self.W = define_class["w"] #潜在クラスW（原因系）の数
+        self.I = 1 #繰り返し回数の変数
+        
+        ###初期設定（乱数を入れる）###
+        self.Pz = np.random.rand(1,self.Z) # P(z) 潜在クラスZ(1×Z)
+        self.Pw = np.random.rand(1,self.W) # P(w) 潜在クラスW(1×W)
+        self.Pi_z = np.random.rand(self.L,self.Z) #P(i|z) ビューインプレッション数　正規分布
+        self.Pv_z = np.random.rand(self.L,self.Z) #P(v|z) コンバージョン数　正規分布
+        self.Pa_zw = np.random.rand(self.L,self.Z,self.W) #P(a|z,w) 広告ID　多項分布
+        self.Pc_w = np.random.rand(self.L,self.W) #P(c|w) 広告費用　正規分布
+        self.Pd_w = np.random.rand(7,self.W) #P(d|w) 曜日　多項分布
+          
+        ###正規化###　
+        self.Pz /= np.sum(self.Pz)
+        self.Pw /= np.sum(self.Pw)
+        self.Pi_z /= np.sum(self.Pi_z,axis=0)[None,:]
+        self.Pv_z /= np.sum(self.Pv_z,axis=0)[None,:]
+        self.Pc_w /= np.sum(self.Pc_w,axis=0)[None,:]
+        self.Pd_w /= np.sum(self.Pd_w,axis=0)[None,:]
+        
+        for x in range(self.L):
+            self.Pa_zw[x] /= np.sum(self.Pa_zw[x])
+
+            
+    def train(self, k=10000, t=1.0e-4): #対数尤度が収束するまでEMアルゴリズムを回す
+        
+        prev_llh = 100000
+        self.starttime = time.time() #開始時間
+        
+        for i in range(k): #Forで繰り返し。k回繰り返す。
+            self.EM_algorithm() #EMアルゴリズムのメソッドを利用
+            llh = self.llh() #対数尤度を求めるllhメソッドを利用
+            
+            if abs((llh - prev_llh) / prev_llh) < t: #abs()で絶対値を求める。収束したら繰り返し終了（break）。
+            
+            self.I+=1 #繰り返し回数を数える
+            prev_llh = llh #計算した対数尤度を1個前の対数尤度として格納
+            
+           
+    def EM_algorithm(self): #EMアルゴリズムの定義
+        
+        ###E-stepの定義### 
+        self.tmp = [] #空の変数を作る
+        self.tmp_z = self.Pz[None,:] * self.Pi_z * self.Pv_z #潜在クラスZに関するもの（Pz,Pa_z,Pr_z）の積
+        self.tmp_w = self.Pw[None,:] * self.Pc_w * self.Pd_w #潜在クラスWに関するもの（Pw,Pv_w,Pd_w）の積
+        
+        self.tmp_empty = np.empty(((self.N.shape[0],self.Pz.shape[0],self.Pw.shape[0]))) #E-stepの分子（全ての同時確率）を入れるための配列を作る。データ数×Z数×W数。 
+        
+        for n in range(self.N.shape[0]):  #普通に掛け合わせると配列の形が合わないから不可能。繰り返しを用いて tmp_z*tmp_w*Pe_zwを計算。
+            for k in range(self.Pz.shape[0]): 
+                for l in range(self.Pw.shape[0]): 
+                    #print('行列の要素：(',n,',',k,',',l,')')
+                    self.tmp_empty[n,k,l] = self.tmp_z[n,k] * self.tmp_w[n,l] * self.Pa_zw[n,k,l] 
+                    #print('tmp_z:',tmp_z[n,k])
+                    #print('tmp_w:',tmp_w[n,l])
+                    #print('Pe_zw:',Pe_zw[n,k,l])
+                    #print('tmp:',tmp_empty[n,k,l])
+
+        self.tmp_k_sum = np.sum(self.tmp_empty,axis=1) #シグマk（潜在クラスZ）の計算
+        self.tmp_kl_sum = np.sum(self.tmp_k_sum,axis=1) #シグマl（潜在クラスW）の計算
+        self.tmp_sum = self.tmp_kl_sum[:,None][:,None] #配列の形を合わせる
+        self.tmp = self.tmp_empty / self.tmp_sum
+        
+        self.tmp[np.isnan(self.tmp)] = 0 
+        self.tmp[np.isinf(self.tmp)] = 0 
+
+        ###M-stepの定義###
+        #潜在クラスZ　P(z)
+        self.tmp_l_siguma = np.sum(self.tmp,axis=2) 
+        self.tmp_nl_siguma = np.sum(self.tmp_l_siguma,axis=0)
+        self.Pz = self.tmp_nl_siguma / self.N.shape[0]
+        
+        #潜在クラスW　P(w)
+        self.tmp_k_siguma = np.sum(self.tmp,axis=1) 
+        self.tmp_nk_siguma = np.sum(self.tmp_k_siguma,axis=0)
+        self.Pw = self.tmp_nk_siguma / self.N.shape[0]
+        
+        #ビューインプレッション数　I　P(i|z)　正規分布
+        #平均
+        self.myu_i_l_siguma = np.sum(self.tmp * self.N[:,1][:,None][:,None],axis=2)
+        self.myu_i_nl_siguma = np.sum(self.myu_i_l_siguma,axis=0)
+        self.myu_i = self.myu_i_nl_siguma / self.tmp_nl_siguma
+        self.myu_i[np.isnan(self.myu_i)] = 0
+        #分散
+        self.n_i = copy.deepcopy(self.N[:,1][:,None])
+        for x in range(self.Z-1):
+            self.n_i = np.hstack((self.n_i,self.N[:,1][:,None]))
+        self.sig_ii = (self.n_i - self.myu_i[None,:])**2
+        self.sig_i = self.sig_ii[:,:,None] * self.tmp
+        self.sig_i = np.sum(self.sig_i,axis=2)
+        self.sig_i = np.sum(self.sig_i,axis=0)  / self.tmp_nl_siguma
+        self.sig_i[np.isnan(self.sig_i)]=0
+        #P(i|z)
+        self.Pi_z=np.exp(-1*(self.n_i-self.myu_i[None,:])**2/(2*self.sig_i[None,:]))/np.sqrt(2*np.pi*(self.sig_i[None,:])**2)
+        self.Pi_z[np.isnan(self.Pi_z)]=0
+        
+        #コンバージョン数　V　P(v|z)　正規分布
+        #平均
+        self.myu_v_l_siguma = np.sum(self.tmp * self.N[:,0][:,None][:,None],axis=2)
+        self.myu_v_nl_siguma = np.sum(self.myu_v_l_siguma,axis=0)
+        self.myu_v = self.myu_v_nl_siguma / self.tmp_nl_siguma
+        self.myu_v[np.isnan(self.myu_v)] = 0
+        #分散
+        self.n_v = copy.deepcopy(self.N[:,0][:,None])
+        for x in range(self.Z-1):
+            self.n_v = np.hstack((self.n_v,self.N[:,0][:,None]))
+        self.sig_vv = (self.n_v - self.myu_v[None,:])**2
+        self.sig_v = self.sig_vv[:,:,None] * self.tmp
+        self.sig_v = np.sum(self.sig_v,axis=2)
+        self.sig_v = np.sum(self.sig_v,axis=0)  / self.tmp_nl_siguma
+        self.sig_v[np.isnan(self.sig_v)]=0
+        #P(v|z)
+        self.Pv_z=np.exp(-1*(self.n_v-self.myu_v[None,:])**2/(2*self.sig_v[None,:]))/np.sqrt(2*np.pi*(self.sig_v[None,:])**2)
+        self.Pv_z[np.isnan(self.Pv_z)]=0
+        
+        #広告ID　A　P(a|z,w)　多項分布
+        self.Pa_zw = self.tmp / np.sum(self.tmp,axis=0)
+        self.Pa_zw[np.isnan(self.Pa_zw)]=0
+        
+        #広告費用　C　P(c|w) 　正規分布
+        #平均
+        self.myu_c_k_siguma = np.sum(self.tmp * self.N[:,2][:,None][:,None],axis=1)
+        self.myu_c_nk_siguma = np.sum(self.myu_c_k_siguma,axis=0)
+        self.myu_c = self.myu_c_nk_siguma / self.tmp_nk_siguma
+        self.myu_c[np.isnan(self.myu_c)] = 0
+        #分散
+        self.n_c = copy.deepcopy(self.N[:,2][:,None])
+        for x in range(self.W-1):
+            self.n_c = np.hstack((self.n_c,self.N[:,2][:,None]))
+        self.sig_cc = (self.n_c - self.myu_c[None,:])**2
+        self.sig_c = self.sig_cc[:,None] * self.tmp
+        self.sig_c = np.sum(self.sig_c,axis=1)
+        self.sig_c = np.sum(self.sig_c,axis=0)  / self.tmp_nk_siguma
+        self.sig_c[np.isnan(self.sig_c)]=0
+        #P(c|w)
+        self.Pc_w=np.exp(-1*(self.n_c-self.myu_c[None,:])**2/(2*self.sig_c[None,:]))/np.sqrt(2*np.pi*(self.sig_c[None,:])**2)
+        self.Pc_w[np.isnan(self.Pc_w)]=0
+        
+        #曜日　D　P(d|w）　多項分布
+        self.Pd_w_k_siguma = np.sum(self.tmp,axis=1)
+        self.Pd_w = self.Pd_w_k_siguma / self.tmp_nk_siguma
+        self.Pd_w[np.isnan(self.Pd_w)]=0
+        
+        
+    def llh(self): #対数尤度
+        
+        self.llh_z = self.Pz[None,:] * self.Pi_z * self.Pv_z 
+        self.llh_w = self.Pw[None,:] * self.Pc_w * self.Pd_w
+        self.llh_zw = np.empty(((self.N.shape[0],self.Pz.shape[0],self.Pw.shape[0]))) 
+        
+        for n in range(self.N.shape[0]):  #普通に掛け合わせると配列の形が合わないからできない。
+            for k in range(self.Pz.shape[0]): 
+                for l in range(self.Pw.shape[0]): 
+                    self.llh_zw[n,k,l] = self.llh_z[n,k] * self.llh_w[n,l] * self.Pa_zw[n,k,l] 
+        
+        lPzw = np.log(self.llh_zw)
+        lPzw[np.isinf(lPzw)] = -100
+        lPzw[np.isnan(lPzw)] = -100
+        return np.sum(lPzw)
+        
+
+        
+        
+##################################################
+dataset = pd.read_csv('Opt_dataset_origin.csv')
+dataset = dataset.values.tolist() #tolist()で既存のndarrayをリストへ変換。ndarrayは、Numpyで使われる配列型のデータ構造。
+
+fmm = FMM(dataset,15,10)
+fmm.train()
